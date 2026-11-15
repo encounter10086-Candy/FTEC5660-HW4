@@ -228,7 +228,7 @@ def parse_query(question: str) -> dict:
     }
     return out
 
-from langchain.retrievers import BM25Retriever
+from langchain_community.retrievers import BM25Retriever
 def build_index(chunks: list[Document]) -> Any:
     """Task 2: index the chunks of the whole corpus (the output of chunk_document), once per run.
 
