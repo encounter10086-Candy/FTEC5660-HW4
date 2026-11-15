@@ -123,21 +123,32 @@ def chunk_document(file_name: str, html: str) -> list[Document]:
     h1_tag = soup.find("h1")
     h1_text = h1_tag.get_text(strip=True) if h1_tag else ""
 
-    company = h1_text.split("(")[0].replace("Annual Report", "").replace("Fourth Quarter", "").strip()
-    
-    doc_type: str
-    if "Earnings Conference Call" in h1_text:
-        doc_type = "earnings_call"
-    elif "results review" in html.lower():
-        doc_type = "research_report"
+    # Extract company name from h1, clean common report keywords
+    if h1_text:
+        raw_company = h1_text.split("(")[0]
+        company = raw_company.replace("Annual Report", "")\
+                             .replace("Fourth Quarter", "")\
+                             .replace("Earnings Conference Call", "")\
+                             .replace("Results Review", "").strip()
     else:
-        doc_type = "annual_report"
+        company = file_name  # fallback if no h1
 
-    year_matches = re.findall(r"20\d{2}", h1_text + " " + html)
-    fiscal_year: int
-    if doc_type == "earnings_call" or doc_type == "research_report":
-        fiscal_year = 2025
+    # Determine doc_type, validate against DOC_TYPES
+    if "Earnings Conference Call" in h1_text:
+        doc_type_candidate = "earnings_call"
+    elif "results review" in h1_text.lower() or "results review" in html.lower():
+        doc_type_candidate = "research_report"
     else:
+        doc_type_candidate = "annual_report"
+    doc_type = doc_type_candidate if doc_type_candidate in DOC_TYPES else "annual_report"
+
+    # Strict fiscal year regex: match "Fiscal Year 20XX" first
+    fy_match = re.search(r"Fiscal Year\s+(20\d{2})", h1_text + " " + html)
+    if fy_match:
+        fiscal_year = int(fy_match.group(1))
+    else:
+        # Fallback: grab any 20xx number if fiscal year pattern not found
+        year_matches = re.findall(r"20\d{2}", h1_text + " " + html)
         fiscal_year = int(year_matches[0]) if year_matches else 2025
 
     base_metadata = {
@@ -148,7 +159,6 @@ def chunk_document(file_name: str, html: str) -> list[Document]:
     }
 
     full_text_parts = []
-
     for elem in soup.find_all(["p", "h1", "h2", "h3", "h4", "li", "table"]):
         if elem.name == "table":
             table_html_str = str(elem)
@@ -260,7 +270,7 @@ def retrieve(index: Any, question: str) -> list[Document]:
         target_companies = found_companies
         parsed["companies"] = target_companies
 
-    raw_candidates: list[Document] = index["retriever"].get_relevant_documents(question)
+    raw_candidates: list[Document] = index["retriever"].invoke(question)
     
     filtered = []
     for doc in raw_candidates:
