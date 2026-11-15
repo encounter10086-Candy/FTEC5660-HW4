@@ -110,7 +110,7 @@ def table_to_text(table_html: str) -> str:
     final_text = "\n".join(output_lines)
     return final_text
     
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 def chunk_document(file_name: str, html: str) -> list[Document]:
     """Task 1.2: split one document into chunks of at most MAX_CHUNK_CHARS characters.
 
