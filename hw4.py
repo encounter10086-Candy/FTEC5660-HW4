@@ -127,15 +127,15 @@ def chunk_document(file_name: str, html: str) -> list[Document]:
     
     doc_type: str
     if "Earnings Conference Call" in h1_text:
-        doc_type = "earnings call"
+        doc_type = "earnings_call"
     elif "results review" in html.lower():
-        doc_type = "research report"
+        doc_type = "research_report"
     else:
-        doc_type = "annual report"
+        doc_type = "annual_report"
 
     year_matches = re.findall(r"20\d{2}", h1_text + " " + html)
     fiscal_year: int
-    if doc_type == "earnings call" or doc_type == "research report":
+    if doc_type == "earnings_call" or doc_type == "research_report":
         fiscal_year = 2025
     else:
         fiscal_year = int(year_matches[0]) if year_matches else 2025
@@ -197,11 +197,11 @@ def parse_query(question: str) -> dict:
     if four_digits:
         fiscal_year = four_digits[0]
 
-    doc_type = "annual report"
+    doc_type = "annual_report"
     if re.search(r"earnings\s+call|conference\s+call", q_low):
-        doc_type = "earnings call"
+        doc_type = "earnings_call"
     elif re.search(r"target price|forecast|results review|estimate|broker", q_low):
-        doc_type = "research report"
+        doc_type = "research_report"
 
     companies = []
 
@@ -236,8 +236,10 @@ def build_index(chunks: list[Document]) -> Any:
     """
     ### YOUR CODE HERE
     bm25_retriever = BM25Retriever.from_documents(chunks)
-    bm25_retriever.all_chunks = chunks
-    return bm25_retriever
+    return {
+        "retriever": bm25_retriever,
+        "all_chunks": chunks
+    }
 
 
 def retrieve(index: Any, question: str) -> list[Document]:
@@ -251,15 +253,15 @@ def retrieve(index: Any, question: str) -> list[Document]:
     target_fiscal_year = parsed["fiscal_year"]
     target_doc_type = parsed["doc_type"]
 
-    all_chunks = index.all_chunks
+    all_chunks = index["all_chunks"]
     real_company_set = {doc.metadata["company"] for doc in all_chunks}
     if not target_companies:
         found_companies = [c for c in real_company_set if c.lower() in question.lower()]
         target_companies = found_companies
         parsed["companies"] = target_companies
 
-    raw_candidates: list[Document] = index.get_relevant_documents(question)
-
+    raw_candidates: list[Document] = index["retriever"].get_relevant_documents(question)
+    
     filtered = []
     for doc in raw_candidates:
         meta = doc.metadata
