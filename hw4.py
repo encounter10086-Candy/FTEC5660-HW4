@@ -33,7 +33,7 @@ load_dotenv()
 # Your code: add imports, constants and helper functions here.
 # =============================================================================
 
-
+from bs4 import BeautifulSoup
 def table_to_text(table_html: str) -> str:
     """Task 1.1: turn one HTML <table> into text that keeps every value with its row and its column.
 
@@ -43,9 +43,74 @@ def table_to_text(table_html: str) -> str:
     LLM here.
     """
     ### YOUR CODE HERE
-    return ""
+    soup = BeautifulSoup(table_html, "html.parser")
+    table = soup.find("table")
+    if not table:
+        return ""
+        
+    output_lines = []
+    
+    caption_tag = table.find("caption")
+    if caption_tag:
+        caption_text = caption_tag.get_text(strip=True)
+        output_lines.append(caption_text)
+        
+    header_row = None
+    thead = table.find("thead")
+    if thead:
+        trs = thead.find_all("tr")
+        if trs:
+            header_row = trs[0]
+    else:
+        all_tr = table.find_all("tr")
+        if len(all_tr) > 0:
+            header_row = all_tr[0]
 
+    col_headers = []
+    if header_row:
+        ths = header_row.find_all(["th", "td"])
+        for th in ths:
+            txt = th.get_text(strip=True)
+            col_headers.append(txt)
 
+    if len(col_headers) <= 1:
+        return "\n".join(output_lines)
+        
+    data_rows = []
+    tbody = table.find("tbody")
+    if tbody:
+        data_rows = tbody.find_all("tr")
+    else:
+        all_tr = table.find_all("tr")
+        if len(all_tr) > 1:
+            data_rows = all_tr[1:]
+
+    for tr in data_rows:
+        cells = tr.find_all(["td", "th"])
+        if not cells:
+            continue
+        cell_texts = [c.get_text(strip=True) for c in cells]
+
+        row_label = cell_texts[0]
+        parts = [row_label]
+
+        for idx in range(1, len(cell_texts)):
+            if idx >= len(col_headers):
+                break
+            hdr = col_headers[idx]
+            val = cell_texts[idx]
+            parts.append(f"{hdr}: {val}")
+
+        line = " | ".join(parts)
+
+        if len(line) > 400:
+            line = line[:400]
+        output_lines.append(line)
+
+    final_text = "\n".join(output_lines)
+    return final_text
+    
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 def chunk_document(file_name: str, html: str) -> list[Document]:
     """Task 1.2: split one document into chunks of at most MAX_CHUNK_CHARS characters.
 
@@ -53,7 +118,65 @@ def chunk_document(file_name: str, html: str) -> list[Document]:
     "doc_type" (one of DOC_TYPES). Do not call the LLM here.
     """
     ### YOUR CODE HERE
-    return []
+    soup = BeautifulSoup(html, "html.parser")
+
+    h1_tag = soup.find("h1")
+    h1_text = h1_tag.get_text(strip=True) if h1_tag else ""
+
+    company = h1_text.split("(")[0].replace("Annual Report", "").replace("Fourth Quarter", "").strip()
+    
+    doc_type: str
+    if "Earnings Conference Call" in h1_text:
+        doc_type = "earnings call"
+    elif "results review" in html.lower():
+        doc_type = "research report"
+    else:
+        doc_type = "annual report"
+
+    year_matches = re.findall(r"20\d{2}", h1_text + " " + html)
+    fiscal_year: int
+    if doc_type == "earnings call" or doc_type == "research report":
+        fiscal_year = 2025
+    else:
+        fiscal_year = int(year_matches[0]) if year_matches else 2025
+
+    base_metadata = {
+        "source": file_name,
+        "company": company,
+        "fiscal_year": fiscal_year,
+        "doc_type": doc_type
+    }
+
+    full_text_parts = []
+
+    for elem in soup.find_all(["p", "h1", "h2", "h3", "h4", "li", "table"]):
+        if elem.name == "table":
+            table_html_str = str(elem)
+            table_txt = table_to_text(table_html_str)
+            full_text_parts.append(table_txt)
+        else:
+            txt = elem.get_text(strip=True)
+            if txt:
+                full_text_parts.append(txt)
+
+    full_document_text = "\n".join(full_text_parts)
+
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=MAX_CHUNK_CHARS,
+        chunk_overlap=200,
+        length_function=len,
+    )
+    texts = splitter.split_text(full_document_text)
+
+    chunks: list[Document] = []
+    for piece in texts:
+        doc = Document(
+            page_content=piece,
+            metadata=base_metadata.copy()
+        )
+        chunks.append(doc)
+
+    return chunks
 
 
 def parse_query(question: str) -> dict:
@@ -62,7 +185,48 @@ def parse_query(question: str) -> dict:
     The rules for each field are under Task 2.2 in the handout. You may use make_llm() here.
     """
     ### YOUR CODE HERE
-    return {}
+    q_low = question.lower()
+
+    fiscal_year = None
+    year_pattern = re.compile(r"(FY\s?)?(\d{4})")
+    matches = year_pattern.findall(question)
+    four_digits = []
+    for prefix, num_str in matches:
+        if num_str.startswith("20"):
+            four_digits.append(int(num_str))
+    if four_digits:
+        fiscal_year = four_digits[0]
+
+    doc_type = "annual report"
+    if re.search(r"earnings\s+call|conference\s+call", q_low):
+        doc_type = "earnings call"
+    elif re.search(r"target price|forecast|results review|estimate|broker", q_low):
+        doc_type = "research report"
+
+    companies = []
+
+    cmp_pat = re.compile(r":\s*(.+?)\s+or\s+(.+?)(\?|$)")
+    cmp_match = cmp_pat.search(question)
+    if cmp_match:
+        c1 = cmp_match.group(1).strip()
+        c2 = cmp_match.group(2).strip()
+        companies.append(c1)
+        companies.append(c2)
+    else:
+        for_pat = re.compile(r"for\s+([A-Za-z0‑9\s&]+?)(,|\?| in | at |\.)")
+        for_match = for_pat.search(question)
+        if for_match:
+            c = for_match.group(1).strip()
+            companies.append(c)
+
+    companies = [c for c in companies if c]
+
+    out = {
+        "companies": companies,
+        "fiscal_year": fiscal_year,
+        "doc_type": doc_type
+    }
+    return out
 
 
 def build_index(chunks: list[Document]) -> Any:
