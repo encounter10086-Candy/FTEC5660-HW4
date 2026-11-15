@@ -228,14 +228,16 @@ def parse_query(question: str) -> dict:
     }
     return out
 
-
+from langchain.retrievers import BM25Retriever
 def build_index(chunks: list[Document]) -> Any:
     """Task 2: index the chunks of the whole corpus (the output of chunk_document), once per run.
 
     Return anything retrieve() needs: a BM25 or TF-IDF index, the chunks grouped by metadata, ...
     """
     ### YOUR CODE HERE
-    return None
+    bm25_retriever = BM25Retriever.from_documents(chunks)
+    bm25_retriever.all_chunks = chunks
+    return bm25_retriever
 
 
 def retrieve(index: Any, question: str) -> list[Document]:
@@ -244,7 +246,56 @@ def retrieve(index: Any, question: str) -> list[Document]:
     Return [] when the corpus cannot answer the question: the generator then answers NOT_FOUND.
     """
     ### YOUR CODE HERE
-    return []
+    parsed = parse_query(question)
+    target_companies = parsed["companies"]
+    target_fiscal_year = parsed["fiscal_year"]
+    target_doc_type = parsed["doc_type"]
+
+    all_chunks = index.all_chunks
+    real_company_set = {doc.metadata["company"] for doc in all_chunks}
+    if not target_companies:
+        found_companies = [c for c in real_company_set if c.lower() in question.lower()]
+        target_companies = found_companies
+        parsed["companies"] = target_companies
+
+    raw_candidates: list[Document] = index.get_relevant_documents(question)
+
+    filtered = []
+    for doc in raw_candidates:
+        meta = doc.metadata
+        c_ok = meta["company"] in target_companies
+        dt_ok = meta["doc_type"] == target_doc_type
+        if c_ok and dt_ok:
+            filtered.append(doc)
+
+    if len(target_companies) >= 2:
+        have_company = {c: False for c in target_companies}
+        for d in filtered:
+            comp = d.metadata["company"]
+            if comp in have_company:
+                have_company[comp] = True
+        missing = [c for c, ok in have_company.items() if not ok]
+        for miss_comp in missing:
+            supplement = [
+                d for d in all_chunks
+                if d.metadata["company"] == miss_comp and d.metadata["doc_type"] == target_doc_type
+            ]
+            filtered.extend(supplement)
+
+    seen_ids = set()
+    unique_filtered = []
+    for d in filtered:
+        obj_id = id(d)
+        if obj_id not in seen_ids:
+            seen_ids.add(obj_id)
+            unique_filtered.append(d)
+
+    final = unique_filtered[:MAX_RETRIEVED]
+
+    if len(final) == 0:
+        return []
+
+    return final
 
 
 # =============================================================================
