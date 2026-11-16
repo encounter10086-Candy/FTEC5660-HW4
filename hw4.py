@@ -124,7 +124,6 @@ def chunk_document(file_name: str, html: str) -> list[Document]:
     h1_tag = soup.find("h1")
     h1_text = h1_tag.get_text(strip=True) if h1_tag else ""
     
-    # 1. 提取 Company
     if h1_text:
         raw_company = h1_text.split("(")[0]
         company = raw_company.replace("Annual Report", "")\
@@ -134,7 +133,6 @@ def chunk_document(file_name: str, html: str) -> list[Document]:
     else:
         company = file_name  
         
-    # 2. 提取 Doc Type
     html_lower = html.lower()
     if "earnings conference call" in html_lower or "earnings call" in html_lower:
         doc_type_candidate = "earnings_call"
@@ -145,7 +143,6 @@ def chunk_document(file_name: str, html: str) -> list[Document]:
         
     doc_type = doc_type_candidate if doc_type_candidate in DOC_TYPES else "annual_report"
 
-    # 3. 提取 Fiscal Year (加入了 FY)
     fy_match = re.search(r"(?:Fiscal Year|Annual Report|Full Year|FY)\s*(20\d{2})", h1_text + " " + html, re.IGNORECASE)
     if fy_match:
         fiscal_year = int(fy_match.group(1))
@@ -160,7 +157,6 @@ def chunk_document(file_name: str, html: str) -> list[Document]:
         "doc_type": doc_type
     }
 
-    # 4. 提取正文和表格
     full_text_parts = []
     for elem in soup.find_all(["p", "h1", "h2", "h3", "h4", "li", "table"]):
         if elem.name == "table":
@@ -172,11 +168,9 @@ def chunk_document(file_name: str, html: str) -> list[Document]:
             if txt:
                 full_text_parts.append(txt)
 
-    # 5. 加上元数据头（极其关键！这能极大提升 Task 2 的召回率）
     header_context = f"Company: {company} | Year: {fiscal_year} | Doc Type: {doc_type}\n"
     full_document_text = header_context + "\n".join(full_text_parts)
 
-    # 6. 分块
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=MAX_CHUNK_CHARS,
         chunk_overlap=200,
