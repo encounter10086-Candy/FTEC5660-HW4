@@ -129,6 +129,7 @@ def chunk_document(file_name: str, html: str) -> list[Document]:
                              .replace("Fourth Quarter", "")\
                              .replace("Earnings Conference Call", "")\
                              .replace("Results Review", "").strip()
+        company = re.sub(r'\b(Inc\.?|Ltd\.?|Corp\.?|Corporation|plc|LLC)\b', '', company, flags=re.IGNORECASE).strip()
     else:
         company = file_name  
         
@@ -227,11 +228,13 @@ def build_index(chunks: list[Document]) -> Any:
     """
     ### YOUR CODE HERE
     bm25_retriever = BM25Retriever.from_documents(chunks)
+    bm25_retriever.k = MAX_RETRIEVED * 4 
     return {
         "retriever": bm25_retriever,
-        "all_chunks": chunks
+        "all_chunks": chunks,
+        "real_companies": {doc.metadata["company"] for doc in chunks}
     }
-
+   
 
 def retrieve(index: Any, question: str) -> list[Document]:
     """Tasks 2 and 3: at most MAX_RETRIEVED of the chunks given to build_index, best first.
@@ -244,57 +247,74 @@ def retrieve(index: Any, question: str) -> list[Document]:
     target_year = parsed.get("fiscal_year")
     target_doc_type = parsed.get("doc_type", "annual_report")
 
-    all_chunks = index["all_chunks"]
-    
-    real_companies = {doc.metadata["company"] for doc in all_chunks}
+    real_companies = index["real_companies"]
     
     if target_companies:
-        if not any(c in real_companies for c in target_companies):
+        has_valid_company = False
+        for tc in target_companies:
+            if any(tc.lower() in rc.lower() for rc in real_companies):
+                has_valid_company = True
+                break
+        if not has_valid_company:
             return []
-    else:
-        for rc in real_companies:
-            if rc.lower() in question.lower():
-                target_companies.append(rc)
-        if not target_companies:
-            target_companies = list(real_companies) # 实在没有，就全库搜
 
-    candidate_pool = []
-    for doc in all_chunks:
+    raw_candidates = index["retriever"].invoke(question)
+    
+    filtered = []
+    for doc in raw_candidates:
         meta = doc.metadata
-        comp_ok = any(tc in meta["company"] or meta["company"] in tc for tc in target_companies)
+        
+        comp_ok = False
+        if target_companies:
+            for tc in target_companies:
+                if tc.lower() in meta["company"].lower():
+                    comp_ok = True
+                    break
+        else:
+            comp_ok = True 
+            
         doc_ok = meta["doc_type"] == target_doc_type
+        
         year_ok = True
         if target_year:
-            year_ok = meta["fiscal_year"] >= target_year
-            
+            if target_doc_type == "research_report":
+                year_ok = True 
+            else:
+                year_ok = meta["fiscal_year"] in (target_year, target_year + 1)
+                
         if comp_ok and doc_ok and year_ok:
-            candidate_pool.append(doc)
+            filtered.append(doc)
 
-    if not candidate_pool:
+    if len(filtered) < MAX_RETRIEVED:
+        all_chunks = index["all_chunks"]
+        for doc in all_chunks:
+            if doc not in filtered:
+                meta = doc.metadata
+                c_ok = any(tc.lower() in meta["company"].lower() for tc in target_companies) if target_companies else True
+                if c_ok and meta["doc_type"] == target_doc_type:
+                    filtered.append(doc)
+
+    if not filtered:
         return []
-        
-    results = []
-
+    
     if len(target_companies) == 2:
+        final_results = []
         for comp in target_companies:
-            comp_docs = [d for d in candidate_pool if comp in d.metadata["company"]]
+            comp_docs = [d for d in filtered if comp.lower() in d.metadata["company"].lower()]
             if comp_docs:
                 local_retriever = BM25Retriever.from_documents(comp_docs)
-                local_retriever.k = 2  
-                results.extend(local_retriever.invoke(question))
-    else:
-        local_retriever = BM25Retriever.from_documents(candidate_pool)
-        local_retriever.k = MAX_RETRIEVED  # 默认给5个
-        results.extend(local_retriever.invoke(question))
-
-    seen = set()
-    final_results = []
-    for r in results:
-        if r.page_content not in seen:
-            seen.add(r.page_content)
-            final_results.append(r)
-            
-    return final_results[:MAX_RETRIEVED]
+                local_retriever.k = 2
+                final_results.extend(local_retriever.invoke(question))
+        
+        seen = set()
+        unique_res = []
+        for r in final_results:
+            if r.page_content not in seen:
+                seen.add(r.page_content)
+                unique_res.append(r)
+        return unique_res[:MAX_RETRIEVED]
+        
+    return filtered[:MAX_RETRIEVED]
 
 
 # =============================================================================
