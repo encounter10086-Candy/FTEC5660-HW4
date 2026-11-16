@@ -143,7 +143,7 @@ def chunk_document(file_name: str, html: str) -> list[Document]:
     doc_type = doc_type_candidate if doc_type_candidate in DOC_TYPES else "annual_report"
 
     # Strict fiscal year regex: match "Fiscal Year 20XX" first
-    fy_match = re.search(r"Fiscal Year\s+(20\d{2})", h1_text + " " + html)
+    fy_match = re.search(r"(?:Fiscal Year|Annual Report|Full Year)\s+(20\d{2})", h1_text + " " + html)
     if fy_match:
         fiscal_year = int(fy_match.group(1))
     else:
@@ -195,61 +195,27 @@ def parse_query(question: str) -> dict:
     The rules for each field are under Task 2.2 in the handout. You may use make_llm() here.
     """
     ### YOUR CODE HERE
-    q_low = question.lower()
+    try:
+        llm = make_llm()
+        prompt = f"""You are an expert financial analyst. Extract the following from the question:
+1. "companies": A list of company names mentioned in the question. Do NOT include brokers (e.g. BuyFin Capital, Meridian) or audit firms. Include companies not in the corpus.
+2. "fiscal_year": The fiscal year (4-digit integer, e.g. 2024). Return None if no year is mentioned.
+3. "doc_type": "earnings_call" if asking about earnings call; "research_report" if about target price/rating/forecast; otherwise "annual_report".
 
-    fiscal_year = None
-    year_pattern = re.compile(r"(FY\s?)?(\d{4})")
-    matches = year_pattern.findall(question)
-    four_digits = []
-    for prefix, num_str in matches:
-        if num_str.startswith("20"):
-            four_digits.append(int(num_str))
-    if four_digits:
-        fiscal_year = four_digits[0]
+Question: {question}
 
-    doc_type = "annual_report"
-    if re.search(r"earnings\s+call|conference\s+call", q_low):
-        doc_type = "earnings_call"
-    elif re.search(r"target price|forecast|results review|estimate|broker", q_low):
-        doc_type = "research_report"
+Reply ONLY with a valid JSON dictionary, no markdown, no other text.
+Schema: {{"companies": ["Company A", "Company B"], "fiscal_year": 2024, "doc_type": "annual_report"}}"""
 
-    companies = []
-
-    cmp_pat = re.compile(r":\s*(.+?)\s+or\s+(.+?)(\?|$)")
-    cmp_match = cmp_pat.search(question)
-    if cmp_match:
-        c1 = cmp_match.group(1).strip()
-        c2 = cmp_match.group(2).strip()
-        companies.append(c1)
-        companies.append(c2)
-    else:
-        for_pat = re.compile(r"for\s+([A-Za-z0‑9\s&]+?)(,|\?| in | at |\.)")
-        for_match = for_pat.search(question)
-        if for_match:
-            c = for_match.group(1).strip()
-            companies.append(c)
-
-    companies = [c for c in companies if c]
-
-    out = {
-        "companies": companies,
-        "fiscal_year": fiscal_year,
-        "doc_type": doc_type
-    }
-    return out
-
-from langchain_community.retrievers import BM25Retriever
-def build_index(chunks: list[Document]) -> Any:
-    """Task 2: index the chunks of the whole corpus (the output of chunk_document), once per run.
-
-    Return anything retrieve() needs: a BM25 or TF-IDF index, the chunks grouped by metadata, ...
-    """
-    ### YOUR CODE HERE
-    bm25_retriever = BM25Retriever.from_documents(chunks)
-    return {
-        "retriever": bm25_retriever,
-        "all_chunks": chunks
-    }
+        response = llm.invoke(prompt).content.strip()
+        response = response.replace("```json", "").replace("```", "").strip()
+        parsed = json.loads(response)
+        
+        if parsed.get("fiscal_year") is not None:
+            parsed["fiscal_year"] = int(parsed["fiscal_year"])
+        return parsed
+    except Exception:
+        return {"companies": [], "fiscal_year": None, "doc_type": "annual_report"}
 
 
 def retrieve(index: Any, question: str) -> list[Document]:
@@ -259,55 +225,61 @@ def retrieve(index: Any, question: str) -> list[Document]:
     """
     ### YOUR CODE HERE
     parsed = parse_query(question)
-    target_companies = parsed["companies"]
-    target_fiscal_year = parsed["fiscal_year"]
-    target_doc_type = parsed["doc_type"]
+    target_companies = parsed.get("companies", [])
+    target_year = parsed.get("fiscal_year")
+    target_doc_type = parsed.get("doc_type", "annual_report")
 
     all_chunks = index["all_chunks"]
-    real_company_set = {doc.metadata["company"] for doc in all_chunks}
-    if not target_companies:
-        found_companies = [c for c in real_company_set if c.lower() in question.lower()]
-        target_companies = found_companies
-        parsed["companies"] = target_companies
-
-    raw_candidates: list[Document] = index["retriever"].invoke(question)
     
-    filtered = []
-    for doc in raw_candidates:
+    real_companies = {doc.metadata["company"] for doc in all_chunks}
+    
+    if target_companies:
+        if not any(c in real_companies for c in target_companies):
+            return []
+    else:
+        for rc in real_companies:
+            if rc.lower() in question.lower():
+                target_companies.append(rc)
+        if not target_companies:
+            target_companies = list(real_companies) # 实在没有，就全库搜
+
+    candidate_pool = []
+    for doc in all_chunks:
         meta = doc.metadata
-        c_ok = meta["company"] in target_companies
-        dt_ok = meta["doc_type"] == target_doc_type
-        if c_ok and dt_ok:
-            filtered.append(doc)
+        comp_ok = any(tc in meta["company"] or meta["company"] in tc for tc in target_companies)
+        doc_ok = meta["doc_type"] == target_doc_type
+        year_ok = True
+        if target_year:
+            year_ok = meta["fiscal_year"] >= target_year
+            
+        if comp_ok and doc_ok and year_ok:
+            candidate_pool.append(doc)
 
-    if len(target_companies) >= 2:
-        have_company = {c: False for c in target_companies}
-        for d in filtered:
-            comp = d.metadata["company"]
-            if comp in have_company:
-                have_company[comp] = True
-        missing = [c for c, ok in have_company.items() if not ok]
-        for miss_comp in missing:
-            supplement = [
-                d for d in all_chunks
-                if d.metadata["company"] == miss_comp and d.metadata["doc_type"] == target_doc_type
-            ]
-            filtered.extend(supplement)
-
-    seen_ids = set()
-    unique_filtered = []
-    for d in filtered:
-        obj_id = id(d)
-        if obj_id not in seen_ids:
-            seen_ids.add(obj_id)
-            unique_filtered.append(d)
-
-    final = unique_filtered[:MAX_RETRIEVED]
-
-    if len(final) == 0:
+    if not candidate_pool:
         return []
+        
+    results = []
 
-    return final
+    if len(target_companies) == 2:
+        for comp in target_companies:
+            comp_docs = [d for d in candidate_pool if comp in d.metadata["company"]]
+            if comp_docs:
+                local_retriever = BM25Retriever.from_documents(comp_docs)
+                local_retriever.k = 2  
+                results.extend(local_retriever.invoke(question))
+    else:
+        local_retriever = BM25Retriever.from_documents(candidate_pool)
+        local_retriever.k = MAX_RETRIEVED  # 默认给5个
+        results.extend(local_retriever.invoke(question))
+
+    seen = set()
+    final_results = []
+    for r in results:
+        if r.page_content not in seen:
+            seen.add(r.page_content)
+            final_results.append(r)
+            
+    return final_results[:MAX_RETRIEVED]
 
 
 # =============================================================================
