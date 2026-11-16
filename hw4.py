@@ -240,7 +240,6 @@ def retrieve(index: Any, question: str) -> list[Document]:
     Return [] when the corpus cannot answer the question: the generator then answers NOT_FOUND.
     """
     ### YOUR CODE HERE
-
     parsed = parse_query(question)
     target_companies = parsed.get("companies", [])
     target_year = parsed.get("fiscal_year")
@@ -249,7 +248,7 @@ def retrieve(index: Any, question: str) -> list[Document]:
     all_chunks = index["all_chunks"]
     real_companies = index["real_companies"]
 
-    # ================= 1. 精准拒答机制 (针对 Task 3) =================
+    # 1. 基础拒答 (不存在的公司或年份太早)
     if target_companies:
         has_valid = False
         for tc in target_companies:
@@ -265,30 +264,17 @@ def retrieve(index: Any, question: str) -> list[Document]:
     if target_year and target_year < 2023:
         return []
 
-    # 拦截特定未披露指标（针对这4道丢了分的unanswerable题）
-    unanswerable_keywords = ["lobbying", "carbon offset", "churn", "largest single customer"]
-    q_lower = question.lower()
-    if any(kw in q_lower for kw in unanswerable_keywords):
-        return []
-
-    # ================= 2. 智能提取检索词 =================
-    # 如果是 "In which city..."，我们把疑问句转换为陈述句关键词，提升命中率
+    # 2. 智能提取检索词
     clean_query = question
-    if "in which city" in q_lower:
+    if "in which city" in question.lower():
         clean_query = "headquartered city"
-    elif "who was" in q_lower:
-        clean_query = question.replace("who was", "")
-        
     for comp in target_companies:
-        clean_query = clean_query.replace(comp, "")
-        clean_query = clean_query.replace(comp + "'s", "")
-
-    # 稍微清理一下疑问词，保留核心财务名词
+        clean_query = clean_query.replace(comp, "").replace(comp + "'s", "")
     clean_query = re.sub(r'(what|which|who|how much|how many|were|was|did|does|is|the|in usd millions|in percent)', '', clean_query, flags=re.IGNORECASE).strip()
     if not clean_query:
         clean_query = question
 
-    # ================= 3. 元数据过滤 =================
+    # 3. 元数据过滤
     candidate_pool = []
     for doc in all_chunks:
         meta = doc.metadata
@@ -319,38 +305,57 @@ def retrieve(index: Any, question: str) -> list[Document]:
     if not candidate_pool:
         return []
         
-    # ================= 4. 对比题特殊处理 =================
+    # 4. 对比题特殊处理（严格均分，防止一家公司霸屏）
     results = []
     if len(target_companies) == 2:
         for tc in target_companies:
-            # 找出属于这家公司的所有候选文档
             comp_docs = [d for d in candidate_pool if tc.lower() in d.metadata["company"].lower()]
             if comp_docs:
                 local_retriever = BM25Retriever.from_documents(comp_docs)
-                local_retriever.k = 3
+                local_retriever.k = 2  # 每家公司严格只拿 2 个块！
                 results.extend(local_retriever.invoke(clean_query))
     else:
         local_retriever = BM25Retriever.from_documents(candidate_pool)
         local_retriever.k = MAX_RETRIEVED
         results.extend(local_retriever.invoke(clean_query))
 
-    # ================= 5. 召回不足时的绝对兜底 (提升 Task 2.3) =================
-    # 如果普通题只搜到了 1~2 个块，可能是 BM25 漏了，用原问题在池子里再捞一次
     if len(results) < MAX_RETRIEVED:
         fallback = BM25Retriever.from_documents(candidate_pool)
         fallback.k = MAX_RETRIEVED
         results.extend(fallback.invoke(question))
 
+    # 5. 去重截断
     seen = set()
     final_results = []
     for r in results:
         if r.page_content not in seen:
             seen.add(r.page_content)
             final_results.append(r)
-            
-    # ================= 6. LLM 轻量级审核（只针对可能存在的指标缺失） =================
-    # 这里我们不用 LLM 拒答，因为容易误杀。如果关键词被上面拦截了，直接返回空。
-    return final_results[:MAX_RETRIEVED]
+    final_results = final_results[:MAX_RETRIEVED]
+
+    # 6. 动态 Answerability Check (用 LLM 判断是否可答，完全不含硬编码)
+    # 这一步是为了把之前用关键词拦截的 lobbying, carbon offset 用更优雅的方式拦下来
+    if final_results:
+        context_sample = "\n\n".join([r.page_content for r in final_results[:3]])
+        check_prompt = f"""Context:
+{context_sample}
+
+Question: {question}
+
+Does the context above contain the EXACT specific metric, fact, or number needed to answer the question? 
+(For example, if asking for "lobbying expenses" or "churn rate" but the context only has general financial tables, answer NO).
+Reply with strictly "YES" or "NO".
+"""
+        try:
+            llm = make_llm()
+            ans = llm.invoke(check_prompt).content.strip().upper()
+            # 如果大模型坚定地认为没有，就拒答
+            if "NO" in ans and "YES" not in ans:
+                return []
+        except Exception:
+            pass
+
+    return final_results
 
 
 # =============================================================================
