@@ -247,74 +247,96 @@ def retrieve(index: Any, question: str) -> list[Document]:
     target_year = parsed.get("fiscal_year")
     target_doc_type = parsed.get("doc_type", "annual_report")
 
+    all_chunks = index["all_chunks"]
     real_companies = index["real_companies"]
-    
+
+    # --- 1. 极度严格的公司名清洗函数 (去除 Inc, Ltd 等后缀) ---
+    def clean_name(name):
+        name = name.lower()
+        name = re.sub(r'\b(inc\.?|ltd\.?|corp\.?|corporation|plc|llc)\b', '', name)
+        return re.sub(r'\s+', ' ', name).strip()
+
+    clean_targets = [clean_name(c) for c in target_companies]
+    real_companies_clean = {clean_name(c): c for c in real_companies}
+
+    # --- 2. 无情拒答逻辑 (Task 3 得分关键) ---
     if target_companies:
+        # 检查提取出的公司，有没有任何一个真正存在于语料库中
         has_valid_company = False
-        for tc in target_companies:
-            if any(tc.lower() in rc.lower() for rc in real_companies):
+        for tc in clean_targets:
+            if tc in real_companies_clean:
                 has_valid_company = True
                 break
+        # 如果问的公司(如 Halcyon Air Cargo)完全不在库里，直接拒答
         if not has_valid_company:
             return []
 
-    raw_candidates = index["retriever"].invoke(question)
-    
-    filtered = []
-    for doc in raw_candidates:
+    # 拦截不在语料库年份范围内的问题 (比如问 2021 年)
+    if target_year and target_year < 2024:
+        return []
+
+    # --- 3. 构建干净的 Query (去掉公司名和疑问词) ---
+    # 为什么？因为 BM25 搜 "Northgate Robotics 和 Northgate Payments 谁的现金多" 会乱
+    clean_query = question
+    for comp in target_companies:
+        clean_query = clean_query.replace(comp, "")
+    clean_query = re.sub(r'(what|which|who|how much|were|was|did|does|is|the)', '', clean_query, flags=re.IGNORECASE).strip()
+    if not clean_query:
+        clean_query = question # 兜底
+
+    # --- 4. 元数据粗筛 ---
+    candidate_pool = []
+    for doc in all_chunks:
         meta = doc.metadata
-        
-        comp_ok = False
-        if target_companies:
-            for tc in target_companies:
-                if tc.lower() in meta["company"].lower():
-                    comp_ok = True
-                    break
-        else:
-            comp_ok = True 
-            
+        comp_ok = any(tc in clean_name(meta["company"]) for tc in clean_targets) if target_companies else True
         doc_ok = meta["doc_type"] == target_doc_type
         
+        # 年份宽松过滤：研报直接放行，财报允许搜当年及后一年(因为含对比列)
         year_ok = True
         if target_year:
             if target_doc_type == "research_report":
-                year_ok = True 
+                year_ok = True
             else:
                 year_ok = meta["fiscal_year"] in (target_year, target_year + 1)
                 
         if comp_ok and doc_ok and year_ok:
-            filtered.append(doc)
+            candidate_pool.append(doc)
 
-    if len(filtered) < MAX_RETRIEVED:
-        all_chunks = index["all_chunks"]
-        for doc in all_chunks:
-            if doc not in filtered:
-                meta = doc.metadata
-                c_ok = any(tc.lower() in meta["company"].lower() for tc in target_companies) if target_companies else True
-                if c_ok and meta["doc_type"] == target_doc_type:
-                    filtered.append(doc)
-
-    if not filtered:
+    if not candidate_pool:
         return []
+
+    # --- 5. 检索与对比题处理 ---
+    results = []
     
+    # 对比题：两家公司分别搜
     if len(target_companies) == 2:
-        final_results = []
-        for comp in target_companies:
-            comp_docs = [d for d in filtered if comp.lower() in d.metadata["company"].lower()]
+        for tc in clean_targets:
+            comp_docs = [d for d in candidate_pool if tc in clean_name(d.metadata["company"])]
             if comp_docs:
                 local_retriever = BM25Retriever.from_documents(comp_docs)
-                local_retriever.k = 2
-                final_results.extend(local_retriever.invoke(question))
-        
-        seen = set()
-        unique_res = []
-        for r in final_results:
-            if r.page_content not in seen:
-                seen.add(r.page_content)
-                unique_res.append(r)
-        return unique_res[:MAX_RETRIEVED]
-        
-    return filtered[:MAX_RETRIEVED]
+                local_retriever.k = 2  # 每家拿 2 个（共 4 个）
+                results.extend(local_retriever.invoke(clean_query))
+    else:
+        # 单公司题：在候选池里搜
+        local_retriever = BM25Retriever.from_documents(candidate_pool)
+        local_retriever.k = MAX_RETRIEVED
+        results.extend(local_retriever.invoke(clean_query))
+
+    # --- 6. 兜底：如果局部 BM25 搜出来的不够 5 个，用原问题在候选池里补齐 ---
+    if len(results) < MAX_RETRIEVED and candidate_pool:
+        fallback_retriever = BM25Retriever.from_documents(candidate_pool)
+        fallback_retriever.k = MAX_RETRIEVED
+        results.extend(fallback_retriever.invoke(question))
+
+    # --- 7. 去重与截断 ---
+    seen = set()
+    final_results = []
+    for r in results:
+        if r.page_content not in seen:
+            seen.add(r.page_content)
+            final_results.append(r)
+            
+    return final_results[:MAX_RETRIEVED]
 
 
 # =============================================================================
