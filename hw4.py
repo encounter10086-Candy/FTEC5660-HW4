@@ -240,6 +240,7 @@ def retrieve(index: Any, question: str) -> list[Document]:
     Return [] when the corpus cannot answer the question: the generator then answers NOT_FOUND.
     """
     ### YOUR CODE HERE
+
     parsed = parse_query(question)
     target_companies = parsed.get("companies", [])
     target_year = parsed.get("fiscal_year")
@@ -248,6 +249,7 @@ def retrieve(index: Any, question: str) -> list[Document]:
     all_chunks = index["all_chunks"]
     real_companies = index["real_companies"]
 
+    # 1. 基础拒答（不存在的公司，或太早的年份）
     if target_companies:
         has_valid = False
         for tc in target_companies:
@@ -259,9 +261,12 @@ def retrieve(index: Any, question: str) -> list[Document]:
                 break
         if not has_valid:
             return []
-    if target_year and target_year < 2024:
+            
+    # 注意：2023年的问题能在2024年报里找到，所以拦截线降到 2023
+    if target_year and target_year < 2023:
         return []
 
+    # 2. 清理 Query，去掉公司名和废话
     clean_query = question
     for comp in target_companies:
         clean_query = clean_query.replace(comp, "")
@@ -270,16 +275,19 @@ def retrieve(index: Any, question: str) -> list[Document]:
     if not clean_query:
         clean_query = question
 
+    # 3. 元数据粗筛
     candidate_pool = []
     for doc in all_chunks:
         meta = doc.metadata
         comp_ok = any(tc.lower() in meta["company"].lower() or meta["company"].lower() in tc.lower() for tc in target_companies) if target_companies else True
         doc_ok = meta["doc_type"] == target_doc_type
+        
         year_ok = True
         if target_year:
             if target_doc_type == "research_report":
                 year_ok = True
             else:
+                # 问 2023，可以查 2023 或 2024 的报告（2024有对比列）
                 year_ok = meta["fiscal_year"] in (target_year, target_year + 1)
                 
         if comp_ok and doc_ok and year_ok:
@@ -299,8 +307,10 @@ def retrieve(index: Any, question: str) -> list[Document]:
     if not candidate_pool:
         return []
         
+    # 4. 检索
     results = []
     if len(target_companies) == 2:
+        # 对比题：两家公司各找最相关的 3 块
         for tc in target_companies:
             comp_docs = [d for d in candidate_pool if tc.lower() in d.metadata["company"].lower()]
             if comp_docs:
@@ -312,33 +322,15 @@ def retrieve(index: Any, question: str) -> list[Document]:
         local_retriever.k = MAX_RETRIEVED
         results.extend(local_retriever.invoke(clean_query))
 
+    # 5. 去重并截断
     seen = set()
     final_results = []
     for r in results:
         if r.page_content not in seen:
             seen.add(r.page_content)
             final_results.append(r)
-    final_results = final_results[:MAX_RETRIEVED]
-
-    if final_results:
-        context_str = "\n\n".join([r.page_content for r in final_results[:3]]) 
-        check_prompt = f"""Context:
-{context_str}
-
-Question: {question}
-
-Does the context above contain the exact information needed to answer the question? (e.g., the specific number, person, or fact asked for).
-If yes, reply with only "YES". If the context does not contain the answer (e.g., it mentions the company but not the specific metric), reply with only "NO".
-"""
-        try:
-            llm = make_llm()
-            ans = llm.invoke(check_prompt).content.strip().upper()
-            if "NO" in ans and "YES" not in ans:
-                return []
-        except Exception:
-            pass
-
-    return final_results
+            
+    return final_results[:MAX_RETRIEVED]
 
 
 # =============================================================================
