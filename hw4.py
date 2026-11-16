@@ -242,101 +242,93 @@ def retrieve(index: Any, question: str) -> list[Document]:
     Return [] when the corpus cannot answer the question: the generator then answers NOT_FOUND.
     """
     ### YOUR CODE HERE
+
     parsed = parse_query(question)
     target_companies = parsed.get("companies", [])
     target_year = parsed.get("fiscal_year")
     target_doc_type = parsed.get("doc_type", "annual_report")
 
-    all_chunks = index["all_chunks"]
     real_companies = index["real_companies"]
-
-    # --- 1. 极度严格的公司名清洗函数 (去除 Inc, Ltd 等后缀) ---
-    def clean_name(name):
-        name = name.lower()
-        name = re.sub(r'\b(inc\.?|ltd\.?|corp\.?|corporation|plc|llc)\b', '', name)
-        return re.sub(r'\s+', ' ', name).strip()
-
-    clean_targets = [clean_name(c) for c in target_companies]
-    real_companies_clean = {clean_name(c): c for c in real_companies}
-
-    # --- 2. 无情拒答逻辑 (Task 3 得分关键) ---
+    
+    # 1. 拒答逻辑：如果问了不存在的公司
     if target_companies:
-        # 检查提取出的公司，有没有任何一个真正存在于语料库中
         has_valid_company = False
-        for tc in clean_targets:
-            if tc in real_companies_clean:
+        for tc in target_companies:
+            # 模糊匹配：只要其中一个公司能在库里找到
+            if any(tc.lower() in rc.lower() for rc in real_companies):
                 has_valid_company = True
                 break
-        # 如果问的公司(如 Halcyon Air Cargo)完全不在库里，直接拒答
         if not has_valid_company:
             return []
 
-    # 拦截不在语料库年份范围内的问题 (比如问 2021 年)
-    if target_year and target_year < 2024:
-        return []
-
-    # --- 3. 构建干净的 Query (去掉公司名和疑问词) ---
-    # 为什么？因为 BM25 搜 "Northgate Robotics 和 Northgate Payments 谁的现金多" 会乱
-    clean_query = question
-    for comp in target_companies:
-        clean_query = clean_query.replace(comp, "")
-    clean_query = re.sub(r'(what|which|who|how much|were|was|did|does|is|the)', '', clean_query, flags=re.IGNORECASE).strip()
-    if not clean_query:
-        clean_query = question # 兜底
-
-    # --- 4. 元数据粗筛 ---
-    candidate_pool = []
-    for doc in all_chunks:
+    # 2. 全局 BM25 召回 Top 20 候选池
+    raw_candidates = index["retriever"].invoke(question)
+    
+    # 3. 元数据过滤
+    filtered = []
+    for doc in raw_candidates:
         meta = doc.metadata
-        comp_ok = any(tc in clean_name(meta["company"]) for tc in clean_targets) if target_companies else True
+        
+        # 3.1 公司过滤
+        comp_ok = False
+        if target_companies:
+            for tc in target_companies:
+                if tc.lower() in meta["company"].lower():
+                    comp_ok = True
+                    break
+        else:
+            comp_ok = True # 没提取到公司，全留
+            
+        # 3.2 文档类型过滤
         doc_ok = meta["doc_type"] == target_doc_type
         
-        # 年份宽松过滤：研报直接放行，财报允许搜当年及后一年(因为含对比列)
+        # 3.3 年份过滤 (放宽)
         year_ok = True
         if target_year:
             if target_doc_type == "research_report":
-                year_ok = True
+                year_ok = True # 研报不管年份直接放行 (FY2025发布的研报可以预测FY2026)
             else:
+                # 年报：问2024年，可以在2024年报或2025年报的对比列里。问2025年只能在2025年报里。
                 year_ok = meta["fiscal_year"] in (target_year, target_year + 1)
                 
         if comp_ok and doc_ok and year_ok:
-            candidate_pool.append(doc)
+            filtered.append(doc)
 
-    if not candidate_pool:
+    # 4. 如果粗排过滤完不够 5 个，去全库里补齐候选
+    if len(filtered) < MAX_RETRIEVED:
+        all_chunks = index["all_chunks"]
+        for doc in all_chunks:
+            if doc not in filtered:
+                meta = doc.metadata
+                c_ok = any(tc.lower() in meta["company"].lower() for tc in target_companies) if target_companies else True
+                if c_ok and meta["doc_type"] == target_doc_type:
+                    filtered.append(doc)
+
+    if not filtered:
         return []
-
-    # --- 5. 检索与对比题处理 ---
-    results = []
-    
-    # 对比题：两家公司分别搜
+        
+    # 5. 处理对比题 (Comparison)
     if len(target_companies) == 2:
-        for tc in clean_targets:
-            comp_docs = [d for d in candidate_pool if tc in clean_name(d.metadata["company"])]
+        final_results = []
+        for comp in target_companies:
+            comp_docs = [d for d in filtered if comp.lower() in d.metadata["company"].lower()]
             if comp_docs:
+                # 使用极速的局部 BM25 对每个公司单独搜
                 local_retriever = BM25Retriever.from_documents(comp_docs)
-                local_retriever.k = 2  # 每家拿 2 个（共 4 个）
-                results.extend(local_retriever.invoke(clean_query))
-    else:
-        # 单公司题：在候选池里搜
-        local_retriever = BM25Retriever.from_documents(candidate_pool)
-        local_retriever.k = MAX_RETRIEVED
-        results.extend(local_retriever.invoke(clean_query))
-
-    # --- 6. 兜底：如果局部 BM25 搜出来的不够 5 个，用原问题在候选池里补齐 ---
-    if len(results) < MAX_RETRIEVED and candidate_pool:
-        fallback_retriever = BM25Retriever.from_documents(candidate_pool)
-        fallback_retriever.k = MAX_RETRIEVED
-        results.extend(fallback_retriever.invoke(question))
-
-    # --- 7. 去重与截断 ---
-    seen = set()
-    final_results = []
-    for r in results:
-        if r.page_content not in seen:
-            seen.add(r.page_content)
-            final_results.append(r)
-            
-    return final_results[:MAX_RETRIEVED]
+                local_retriever.k = 2
+                final_results.extend(local_retriever.invoke(question))
+        
+        # 去重并返回
+        seen = set()
+        unique_res = []
+        for r in final_results:
+            if r.page_content not in seen:
+                seen.add(r.page_content)
+                unique_res.append(r)
+        return unique_res[:MAX_RETRIEVED]
+        
+    # 6. 普通单公司题
+    return filtered[:MAX_RETRIEVED]
 
 
 # =============================================================================
