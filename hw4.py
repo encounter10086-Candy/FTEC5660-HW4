@@ -118,21 +118,23 @@ def chunk_document(file_name: str, html: str) -> list[Document]:
     "doc_type" (one of DOC_TYPES). Do not call the LLM here.
     """
     ### YOUR CODE HERE
+    
     soup = BeautifulSoup(html, "html.parser")
 
     h1_tag = soup.find("h1")
     h1_text = h1_tag.get_text(strip=True) if h1_tag else ""
     
+    # 1. 提取 Company
     if h1_text:
         raw_company = h1_text.split("(")[0]
         company = raw_company.replace("Annual Report", "")\
                              .replace("Fourth Quarter", "")\
                              .replace("Earnings Conference Call", "")\
                              .replace("Results Review", "").strip()
-        company = re.sub(r'\b(Inc\.?|Ltd\.?|Corp\.?|Corporation|plc|LLC)\b', '', company, flags=re.IGNORECASE).strip()
     else:
         company = file_name  
         
+    # 2. 提取 Doc Type
     html_lower = html.lower()
     if "earnings conference call" in html_lower or "earnings call" in html_lower:
         doc_type_candidate = "earnings_call"
@@ -143,6 +145,7 @@ def chunk_document(file_name: str, html: str) -> list[Document]:
         
     doc_type = doc_type_candidate if doc_type_candidate in DOC_TYPES else "annual_report"
 
+    # 3. 提取 Fiscal Year (加入了 FY)
     fy_match = re.search(r"(?:Fiscal Year|Annual Report|Full Year|FY)\s*(20\d{2})", h1_text + " " + html, re.IGNORECASE)
     if fy_match:
         fiscal_year = int(fy_match.group(1))
@@ -156,62 +159,41 @@ def chunk_document(file_name: str, html: str) -> list[Document]:
         "fiscal_year": fiscal_year,
         "doc_type": doc_type
     }
-    
-    blocks = []
-    current_text = []
+
+    # 4. 提取正文和表格
+    full_text_parts = []
     for elem in soup.find_all(["p", "h1", "h2", "h3", "h4", "li", "table"]):
         if elem.name == "table":
-            if current_text:
-                blocks.append("\n".join(current_text))
-                current_text = []
-            table_txt = table_to_text(str(elem))
-            if table_txt:
-                blocks.append(table_txt)
+            table_html_str = str(elem)
+            table_txt = table_to_text(table_html_str)
+            full_text_parts.append(table_txt)
         else:
             txt = elem.get_text(strip=True)
             if txt:
-                current_text.append(txt)
-    if current_text:
-        blocks.append("\n".join(current_text))
+                full_text_parts.append(txt)
 
-    chunks: list[Document] = []
+    # 5. 加上元数据头（极其关键！这能极大提升 Task 2 的召回率）
+    header_context = f"Company: {company} | Year: {fiscal_year} | Doc Type: {doc_type}\n"
+    full_document_text = header_context + "\n".join(full_text_parts)
+
+    # 6. 分块
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=MAX_CHUNK_CHARS,
         chunk_overlap=200,
         length_function=len,
     )
+    texts = splitter.split_text(full_document_text)
 
-    for block in blocks:
-        if " | " in block:
-            if len(block) <= MAX_CHUNK_CHARS:
-                chunks.append(block)
-            else:
-                lines = block.split("\n")
-                header = lines[0] 
-                current_chunk = header + "\n"
-                for line in lines[1:]:
-                    if len(current_chunk) + len(line) > MAX_CHUNK_CHARS:
-                        chunks.append(current_chunk)
-                        current_chunk = header + "\n" + line + "\n"
-                    else:
-                        current_chunk += line + "\n"
-                if current_chunk.strip():
-                    chunks.append(current_chunk)
-        else:
-            for piece in splitter.split_text(block):
-                chunks.append(piece)
-
-    final_docs = []
-    for piece in chunks:
-        header_context = f"Company: {company} | Year: {fiscal_year} | Doc Type: {doc_type}\n"
+    chunks: list[Document] = []
+    for piece in texts:
         doc = Document(
-            page_content=header_context + piece,
+            page_content=piece,
             metadata=base_metadata.copy()
         )
-        final_docs.append(doc)
+        chunks.append(doc)
 
-    return final_docs
-
+    return chunks
+   
 
 def parse_query(question: str) -> dict:
     """Task 2.2: {"companies": [names], "fiscal_year": int or None, "doc_type": one of DOC_TYPES}.
