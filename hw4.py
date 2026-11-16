@@ -241,7 +241,6 @@ def retrieve(index: Any, question: str) -> list[Document]:
     """
     ### YOUR CODE HERE
 
-    def retrieve(index: Any, question: str) -> list[Document]:
     parsed = parse_query(question)
     target_companies = parsed.get("companies", [])
     target_year = parsed.get("fiscal_year")
