@@ -240,6 +240,7 @@ def retrieve(index: Any, question: str) -> list[Document]:
     Return [] when the corpus cannot answer the question: the generator then answers NOT_FOUND.
     """
     ### YOUR CODE HERE
+
     parsed = parse_query(question)
     target_companies = parsed.get("companies", [])
     target_year = parsed.get("fiscal_year")
@@ -304,15 +305,15 @@ def retrieve(index: Any, question: str) -> list[Document]:
 
     if not candidate_pool:
         return []
-        
-    # 4. 对比题特殊处理（严格均分，防止一家公司霸屏）
+
+    # 4. 对比题及检索 (恢复 k=3，此前的 75% 就是这样拿到的)
     results = []
     if len(target_companies) == 2:
         for tc in target_companies:
             comp_docs = [d for d in candidate_pool if tc.lower() in d.metadata["company"].lower()]
             if comp_docs:
                 local_retriever = BM25Retriever.from_documents(comp_docs)
-                local_retriever.k = 2  # 每家公司严格只拿 2 个块！
+                local_retriever.k = 3
                 results.extend(local_retriever.invoke(clean_query))
     else:
         local_retriever = BM25Retriever.from_documents(candidate_pool)
@@ -324,7 +325,6 @@ def retrieve(index: Any, question: str) -> list[Document]:
         fallback.k = MAX_RETRIEVED
         results.extend(fallback.invoke(question))
 
-    # 5. 去重截断
     seen = set()
     final_results = []
     for r in results:
@@ -333,27 +333,30 @@ def retrieve(index: Any, question: str) -> list[Document]:
             final_results.append(r)
     final_results = final_results[:MAX_RETRIEVED]
 
-    # 6. 动态 Answerability Check (用 LLM 判断是否可答，完全不含硬编码)
-    # 这一步是为了把之前用关键词拦截的 lobbying, carbon offset 用更优雅的方式拦下来
-    if final_results:
-        context_sample = "\n\n".join([r.page_content for r in final_results[:3]])
-        check_prompt = f"""Context:
-{context_sample}
-
-Question: {question}
-
-Does the context above contain the EXACT specific metric, fact, or number needed to answer the question? 
-(For example, if asking for "lobbying expenses" or "churn rate" but the context only has general financial tables, answer NO).
-Reply with strictly "YES" or "NO".
-"""
-        try:
-            llm = make_llm()
-            ans = llm.invoke(check_prompt).content.strip().upper()
-            # 如果大模型坚定地认为没有，就拒答
-            if "NO" in ans and "YES" not in ans:
-                return []
-        except Exception:
-            pass
+    # ================= 5. 动态名词缺失检测 (替代硬编码和 LLM) =================
+    stopwords = {"what", "which", "who", "how", "much", "many", "were", "was", "did", "does", "is", "the", "in", "usd", "millions", "percent", "company", "had", "hold", "held", "report", "generate", "earn", "spend", "give", "set", "audited", "headquartered", "value", "amount", "total", "higher", "more", "about", "give", "exact"}
+    
+    words = re.findall(r'[a-z]+', question.lower())
+    # 提取长度>=5，且不在停用词里的核心名词
+    key_terms = [w for w in words if len(w) >= 5 and w not in stopwords]
+    
+    missing_terms = []
+    for term in key_terms:
+        term_found = False
+        for doc in final_results:
+            if term in doc.page_content.lower():
+                term_found = True
+                break
+        if not term_found:
+            missing_terms.append(term)
+            
+    # 定义常见的财务通用词，这些词找不到不能作为拒答理由（比如 expenses 经常出现，但具体修饰词可能找不到）
+    generic_words = {"expenses", "income", "revenue", "assets", "equity", "borrowings", "employees", "profit", "margin", "growth", "programme", "reports", "statements", "securities", "investment", "operating", "activities", "financial", "capital", "shares", "annual", "quarter", "fourth"}
+    
+    for term in missing_terms:
+        # 如果出现了一个特定的长词（比如 lobbying, carbon, churn），且文档里根本没有，就说明未披露
+        if term not in generic_words:
+            return []
 
     return final_results
 
