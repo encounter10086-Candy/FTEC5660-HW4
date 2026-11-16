@@ -249,7 +249,7 @@ def retrieve(index: Any, question: str) -> list[Document]:
     all_chunks = index["all_chunks"]
     real_companies = index["real_companies"]
 
-    # 1. 基础拒答 (不存在的公司或年份太早)
+    # 1. 基础拒答（不存在的公司，或太早的年份）
     if target_companies:
         has_valid = False
         for tc in target_companies:
@@ -262,20 +262,20 @@ def retrieve(index: Any, question: str) -> list[Document]:
         if not has_valid:
             return []
             
+    # 注意：2023年的问题能在2024年报里找到，所以拦截线降到 2023
     if target_year and target_year < 2023:
         return []
 
-    # 2. 智能提取检索词
+    # 2. 清理 Query，去掉公司名和废话
     clean_query = question
-    if "in which city" in question.lower():
-        clean_query = "headquartered city"
     for comp in target_companies:
-        clean_query = clean_query.replace(comp, "").replace(comp + "'s", "")
+        clean_query = clean_query.replace(comp, "")
+        clean_query = clean_query.replace(comp + "'s", "")
     clean_query = re.sub(r'(what|which|who|how much|how many|were|was|did|does|is|the|in usd millions|in percent)', '', clean_query, flags=re.IGNORECASE).strip()
     if not clean_query:
         clean_query = question
 
-    # 3. 元数据过滤
+    # 3. 元数据粗筛
     candidate_pool = []
     for doc in all_chunks:
         meta = doc.metadata
@@ -287,6 +287,7 @@ def retrieve(index: Any, question: str) -> list[Document]:
             if target_doc_type == "research_report":
                 year_ok = True
             else:
+                # 问 2023，可以查 2023 或 2024 的报告（2024有对比列）
                 year_ok = meta["fiscal_year"] in (target_year, target_year + 1)
                 
         if comp_ok and doc_ok and year_ok:
@@ -305,10 +306,11 @@ def retrieve(index: Any, question: str) -> list[Document]:
 
     if not candidate_pool:
         return []
-
-    # 4. 对比题及检索 (恢复 k=3，此前的 75% 就是这样拿到的)
+        
+    # 4. 检索
     results = []
     if len(target_companies) == 2:
+        # 对比题：两家公司各找最相关的 3 块
         for tc in target_companies:
             comp_docs = [d for d in candidate_pool if tc.lower() in d.metadata["company"].lower()]
             if comp_docs:
@@ -320,45 +322,15 @@ def retrieve(index: Any, question: str) -> list[Document]:
         local_retriever.k = MAX_RETRIEVED
         results.extend(local_retriever.invoke(clean_query))
 
-    if len(results) < MAX_RETRIEVED:
-        fallback = BM25Retriever.from_documents(candidate_pool)
-        fallback.k = MAX_RETRIEVED
-        results.extend(fallback.invoke(question))
-
+    # 5. 去重并截断
     seen = set()
     final_results = []
     for r in results:
         if r.page_content not in seen:
             seen.add(r.page_content)
             final_results.append(r)
-    final_results = final_results[:MAX_RETRIEVED]
-
-    # ================= 5. 动态名词缺失检测 (替代硬编码和 LLM) =================
-    stopwords = {"what", "which", "who", "how", "much", "many", "were", "was", "did", "does", "is", "the", "in", "usd", "millions", "percent", "company", "had", "hold", "held", "report", "generate", "earn", "spend", "give", "set", "audited", "headquartered", "value", "amount", "total", "higher", "more", "about", "give", "exact"}
-    
-    words = re.findall(r'[a-z]+', question.lower())
-    # 提取长度>=5，且不在停用词里的核心名词
-    key_terms = [w for w in words if len(w) >= 5 and w not in stopwords]
-    
-    missing_terms = []
-    for term in key_terms:
-        term_found = False
-        for doc in final_results:
-            if term in doc.page_content.lower():
-                term_found = True
-                break
-        if not term_found:
-            missing_terms.append(term)
             
-    # 定义常见的财务通用词，这些词找不到不能作为拒答理由（比如 expenses 经常出现，但具体修饰词可能找不到）
-    generic_words = {"expenses", "income", "revenue", "assets", "equity", "borrowings", "employees", "profit", "margin", "growth", "programme", "reports", "statements", "securities", "investment", "operating", "activities", "financial", "capital", "shares", "annual", "quarter", "fourth"}
-    
-    for term in missing_terms:
-        # 如果出现了一个特定的长词（比如 lobbying, carbon, churn），且文档里根本没有，就说明未披露
-        if term not in generic_words:
-            return []
-
-    return final_results
+    return final_results[:MAX_RETRIEVED]
 
 
 # =============================================================================
