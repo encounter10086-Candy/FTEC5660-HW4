@@ -122,8 +122,7 @@ def chunk_document(file_name: str, html: str) -> list[Document]:
 
     h1_tag = soup.find("h1")
     h1_text = h1_tag.get_text(strip=True) if h1_tag else ""
-
-    # Extract company name from h1, clean common report keywords
+    
     if h1_text:
         raw_company = h1_text.split("(")[0]
         company = raw_company.replace("Annual Report", "")\
@@ -131,23 +130,22 @@ def chunk_document(file_name: str, html: str) -> list[Document]:
                              .replace("Earnings Conference Call", "")\
                              .replace("Results Review", "").strip()
     else:
-        company = file_name  # fallback if no h1
-
-    # Determine doc_type, validate against DOC_TYPES
-    if "Earnings Conference Call" in h1_text:
+        company = file_name  
+        
+    html_lower = html.lower()
+    if "earnings conference call" in html_lower or "earnings call" in html_lower:
         doc_type_candidate = "earnings_call"
-    elif "results review" in h1_text.lower() or "results review" in html.lower():
+    elif "results review" in html_lower:
         doc_type_candidate = "research_report"
     else:
         doc_type_candidate = "annual_report"
+        
     doc_type = doc_type_candidate if doc_type_candidate in DOC_TYPES else "annual_report"
 
-    # Strict fiscal year regex: match "Fiscal Year 20XX" first
-    fy_match = re.search(r"(?:Fiscal Year|Annual Report|Full Year)\s+(20\d{2})", h1_text + " " + html)
+    fy_match = re.search(r"(?:Fiscal Year|Annual Report|Full Year|FY)\s*(20\d{2})", h1_text + " " + html, re.IGNORECASE)
     if fy_match:
         fiscal_year = int(fy_match.group(1))
     else:
-        # Fallback: grab any 20xx number if fiscal year pattern not found
         year_matches = re.findall(r"20\d{2}", h1_text + " " + html)
         fiscal_year = int(year_matches[0]) if year_matches else 2025
 
@@ -170,6 +168,9 @@ def chunk_document(file_name: str, html: str) -> list[Document]:
                 full_text_parts.append(txt)
 
     full_document_text = "\n".join(full_text_parts)
+
+    header_context = f"Company: {company} | Year: {fiscal_year} | Doc Type: {doc_type}\n"
+    full_document_text = header_context + "\n".join(full_text_parts)
 
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=MAX_CHUNK_CHARS,
@@ -216,6 +217,20 @@ Schema: {{"companies": ["Company A", "Company B"], "fiscal_year": 2024, "doc_typ
         return parsed
     except Exception:
         return {"companies": [], "fiscal_year": None, "doc_type": "annual_report"}
+
+
+from langchain_community.retrievers import BM25Retriever
+def build_index(chunks: list[Document]) -> Any:
+    """Task 2: index the chunks of the whole corpus (the output of chunk_document), once per run.
+
+    Return anything retrieve() needs: a BM25 or TF-IDF index, the chunks grouped by metadata, ...
+    """
+    ### YOUR CODE HERE
+    bm25_retriever = BM25Retriever.from_documents(chunks)
+    return {
+        "retriever": bm25_retriever,
+        "all_chunks": chunks
+    }
 
 
 def retrieve(index: Any, question: str) -> list[Document]:
