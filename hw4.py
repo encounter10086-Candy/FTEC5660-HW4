@@ -156,39 +156,61 @@ def chunk_document(file_name: str, html: str) -> list[Document]:
         "fiscal_year": fiscal_year,
         "doc_type": doc_type
     }
-
-    full_text_parts = []
+    
+    blocks = []
+    current_text = []
     for elem in soup.find_all(["p", "h1", "h2", "h3", "h4", "li", "table"]):
         if elem.name == "table":
-            table_html_str = str(elem)
-            table_txt = table_to_text(table_html_str)
-            full_text_parts.append(table_txt)
+            if current_text:
+                blocks.append("\n".join(current_text))
+                current_text = []
+            table_txt = table_to_text(str(elem))
+            if table_txt:
+                blocks.append(table_txt)
         else:
             txt = elem.get_text(strip=True)
             if txt:
-                full_text_parts.append(txt)
+                current_text.append(txt)
+    if current_text:
+        blocks.append("\n".join(current_text))
 
-    full_document_text = "\n".join(full_text_parts)
-
-    header_context = f"Company: {company} | Year: {fiscal_year} | Doc Type: {doc_type}\n"
-    full_document_text = header_context + "\n".join(full_text_parts)
-
+    chunks: list[Document] = []
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=MAX_CHUNK_CHARS,
         chunk_overlap=200,
         length_function=len,
     )
-    texts = splitter.split_text(full_document_text)
 
-    chunks: list[Document] = []
-    for piece in texts:
+    for block in blocks:
+        if " | " in block:
+            if len(block) <= MAX_CHUNK_CHARS:
+                chunks.append(block)
+            else:
+                lines = block.split("\n")
+                header = lines[0] 
+                current_chunk = header + "\n"
+                for line in lines[1:]:
+                    if len(current_chunk) + len(line) > MAX_CHUNK_CHARS:
+                        chunks.append(current_chunk)
+                        current_chunk = header + "\n" + line + "\n"
+                    else:
+                        current_chunk += line + "\n"
+                if current_chunk.strip():
+                    chunks.append(current_chunk)
+        else:
+            for piece in splitter.split_text(block):
+                chunks.append(piece)
+
+    final_docs = []
+    for piece in chunks:
+        header_context = f"Company: {company} | Year: {fiscal_year} | Doc Type: {doc_type}\n"
         doc = Document(
-            page_content=piece,
+            page_content=header_context + piece,
             metadata=base_metadata.copy()
         )
-        chunks.append(doc)
+        final_docs.append(doc)
 
-    return chunks
+    return final_docs
 
 
 def parse_query(question: str) -> dict:
@@ -242,93 +264,105 @@ def retrieve(index: Any, question: str) -> list[Document]:
     Return [] when the corpus cannot answer the question: the generator then answers NOT_FOUND.
     """
     ### YOUR CODE HERE
-
     parsed = parse_query(question)
     target_companies = parsed.get("companies", [])
     target_year = parsed.get("fiscal_year")
     target_doc_type = parsed.get("doc_type", "annual_report")
 
+    all_chunks = index["all_chunks"]
     real_companies = index["real_companies"]
-    
-    # 1. 拒答逻辑：如果问了不存在的公司
-    if target_companies:
-        has_valid_company = False
-        for tc in target_companies:
-            # 模糊匹配：只要其中一个公司能在库里找到
-            if any(tc.lower() in rc.lower() for rc in real_companies):
-                has_valid_company = True
-                break
-        if not has_valid_company:
-            return []
 
-    # 2. 全局 BM25 召回 Top 20 候选池
-    raw_candidates = index["retriever"].invoke(question)
-    
-    # 3. 元数据过滤
-    filtered = []
-    for doc in raw_candidates:
-        meta = doc.metadata
-        
-        # 3.1 公司过滤
-        comp_ok = False
-        if target_companies:
-            for tc in target_companies:
-                if tc.lower() in meta["company"].lower():
-                    comp_ok = True
+    if target_companies:
+        has_valid = False
+        for tc in target_companies:
+            for rc in real_companies:
+                if tc.lower() in rc.lower() or rc.lower() in tc.lower():
+                    has_valid = True
                     break
-        else:
-            comp_ok = True # 没提取到公司，全留
-            
-        # 3.2 文档类型过滤
+            if has_valid:
+                break
+        if not has_valid:
+            return []
+    if target_year and target_year < 2024:
+        return []
+
+    clean_query = question
+    for comp in target_companies:
+        clean_query = clean_query.replace(comp, "")
+        clean_query = clean_query.replace(comp + "'s", "")
+    clean_query = re.sub(r'(what|which|who|how much|how many|were|was|did|does|is|the|in usd millions|in percent)', '', clean_query, flags=re.IGNORECASE).strip()
+    if not clean_query:
+        clean_query = question
+
+    candidate_pool = []
+    for doc in all_chunks:
+        meta = doc.metadata
+        comp_ok = any(tc.lower() in meta["company"].lower() or meta["company"].lower() in tc.lower() for tc in target_companies) if target_companies else True
         doc_ok = meta["doc_type"] == target_doc_type
-        
-        # 3.3 年份过滤 (放宽)
         year_ok = True
         if target_year:
             if target_doc_type == "research_report":
-                year_ok = True # 研报不管年份直接放行 (FY2025发布的研报可以预测FY2026)
+                year_ok = True
             else:
-                # 年报：问2024年，可以在2024年报或2025年报的对比列里。问2025年只能在2025年报里。
                 year_ok = meta["fiscal_year"] in (target_year, target_year + 1)
                 
         if comp_ok and doc_ok and year_ok:
-            filtered.append(doc)
+            candidate_pool.append(doc)
 
-    # 4. 如果粗排过滤完不够 5 个，去全库里补齐候选
-    if len(filtered) < MAX_RETRIEVED:
-        all_chunks = index["all_chunks"]
+    if len(candidate_pool) < MAX_RETRIEVED:
         for doc in all_chunks:
-            if doc not in filtered:
-                meta = doc.metadata
-                c_ok = any(tc.lower() in meta["company"].lower() for tc in target_companies) if target_companies else True
-                if c_ok and meta["doc_type"] == target_doc_type:
-                    filtered.append(doc)
+            if doc.page_content in {d.page_content for d in candidate_pool}:
+                continue
+            meta = doc.metadata
+            c_ok = any(tc.lower() in meta["company"].lower() for tc in target_companies) if target_companies else True
+            if c_ok and meta["doc_type"] == target_doc_type:
+                candidate_pool.append(doc)
+                if len(candidate_pool) >= MAX_RETRIEVED * 3:
+                    break
 
-    if not filtered:
+    if not candidate_pool:
         return []
         
-    # 5. 处理对比题 (Comparison)
+    results = []
     if len(target_companies) == 2:
-        final_results = []
-        for comp in target_companies:
-            comp_docs = [d for d in filtered if comp.lower() in d.metadata["company"].lower()]
+        for tc in target_companies:
+            comp_docs = [d for d in candidate_pool if tc.lower() in d.metadata["company"].lower()]
             if comp_docs:
-                # 使用极速的局部 BM25 对每个公司单独搜
                 local_retriever = BM25Retriever.from_documents(comp_docs)
-                local_retriever.k = 2
-                final_results.extend(local_retriever.invoke(question))
-        
-        # 去重并返回
-        seen = set()
-        unique_res = []
-        for r in final_results:
-            if r.page_content not in seen:
-                seen.add(r.page_content)
-                unique_res.append(r)
-        return unique_res[:MAX_RETRIEVED]
-        
-    # 6. 普通单公司题
-    return filtered[:MAX_RETRIEVED]
+                local_retriever.k = 3
+                results.extend(local_retriever.invoke(clean_query))
+    else:
+        local_retriever = BM25Retriever.from_documents(candidate_pool)
+        local_retriever.k = MAX_RETRIEVED
+        results.extend(local_retriever.invoke(clean_query))
+
+    seen = set()
+    final_results = []
+    for r in results:
+        if r.page_content not in seen:
+            seen.add(r.page_content)
+            final_results.append(r)
+    final_results = final_results[:MAX_RETRIEVED]
+
+    if final_results:
+        context_str = "\n\n".join([r.page_content for r in final_results[:3]]) 
+        check_prompt = f"""Context:
+{context_str}
+
+Question: {question}
+
+Does the context above contain the exact information needed to answer the question? (e.g., the specific number, person, or fact asked for).
+If yes, reply with only "YES". If the context does not contain the answer (e.g., it mentions the company but not the specific metric), reply with only "NO".
+"""
+        try:
+            llm = make_llm()
+            ans = llm.invoke(check_prompt).content.strip().upper()
+            if "NO" in ans and "YES" not in ans:
+                return []
+        except Exception:
+            pass
+
+    return final_results
 
 
 # =============================================================================
