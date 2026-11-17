@@ -24,10 +24,10 @@ graph TD
         H -->|Valid| J["BM25 Scoring"]
         
         J --> K["Interleaved Ranking"]
-        K --> L{"LLM Answerability Check"}
+        K --> L{"LLM<br>Answerability<br>Check"}
         
         L -->|Unanswerable| I
-        L -->|Answerable| M["Return Top 5 Chunks"]
+        L -->|Answerable| M["Return<br>Top5 Chunks"]
     end
 ```
 
