@@ -9,25 +9,25 @@ Here is a figure illustrating the architecture of the RAG pipeline, followed by 
 ```mermaid
 graph TD
     subgraph Data Ingestion
-        A[HTML Documents] --> B(Parse HTML & Tables)
-        B --> C(Extract Metadata: Company, Year, Doc Type)
-        C --> D(Chunking with RecursiveCharacterTextSplitter)
-        D --> E(Build Index with BM25Okapi)
+        A["HTML Documents"] --> B["Parse HTML & Tables"]
+        B --> C["Extract Metadata: Company, Year, Doc Type"]
+        C --> D["Chunking with RecursiveCharacterTextSplitter"]
+        D --> E["Build Index with BM25Okapi"]
     end
 
     subgraph Query Time
-        F[User Question] --> G{LLM Query Parsing}
-        G -->|Extract Companies, Year, Doc Type| H{Metadata Filtering & Abstention}
+        F["User Question"] --> G{"LLM Query Parsing"}
+        G -->|Extract Companies, Year, Doc Type| H{"Metadata Filtering & Abstention"}
         
         E -.-> H
-        H -->|If Company/Year Invalid| I[Return Empty List]
-        H -->|If Valid| J(BM25 Scoring with Synonym Expansion)
+        H -->|If Company/Year Invalid| I["Return Empty List"]
+        H -->|If Valid| J["BM25 Scoring with Synonym Expansion"]
         
-        J --> K(Interleaved Ranking for Multi-Company)
-        K --> L{LLM Answerability Check}
+        J --> K["Interleaved Ranking for Multi-Company"]
+        K --> L{"LLM Answerability Check"}
         
         L -->|Unanswerable| I
-        L -->|Answerable| M[Return Top 5 Chunks]
+        L -->|Answerable| M["Return Top 5 Chunks"]
     end
 ```
 
