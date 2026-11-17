@@ -7,7 +7,7 @@
 Here is a figure illustrating the architecture of the RAG pipeline, followed by a detailed description of its components.
 
 ```mermaid
-graph TD
+graph LR
     subgraph Data Ingestion
         A["HTML Documents"] --> B["Parse HTML & Tables"]
         B --> C["Extract Metadata: Company, Year, Doc Type"]
