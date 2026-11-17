@@ -9,15 +9,15 @@ Here is a figure illustrating the architecture of the RAG pipeline, followed by 
 ```mermaid
 graph TD
     subgraph Data Ingestion
-        A["HTML Docs"] --> B["Parse HTML & Tables"]
-        B --> C["Extract Metadata"]
-        C --> D["Text Chunking"]
-        D --> E["Build BM25 Index"]
+        A["HTML Docs"] --> B["Parse HTML <br>& Tables"]
+        B --> C["Extract<br>Metadata"]
+        C --> D["Text<br>Chunking"]
+        D --> E["Build<br>BM25 Index"]
     end
 
     subgraph Query Time
-        F["User Question"] --> G{"LLM Query Parsing"}
-        G -->|Company, Year, Doc Type| H{"Metadata Filtering"}
+        F["User<br>Question"] --> G{"LLM<br>Query<br>Parsing"}
+        G -->|Company, Year,<br>Doc Type| H{"Metadata<br>Filtering"}
         
         E -.-> H
         H -->|Invalid Company/Year| I["Return []"]
