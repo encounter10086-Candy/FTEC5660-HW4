@@ -65,3 +65,19 @@ While the final V4 pipeline is flawless on the public set, analyzing the interme
 2.  **Unbalanced Comparison Retrieval (V2):** V2 completely failed `comparison` questions. BM25 naturally favors one company's dense tables over another's. Fixing this via interleaved retrieval (V3) was the single biggest contributor to reaching 100% accuracy.
 3.  **False Positives on Undisclosed Metrics (V3):** V3 failed to abstain on 4 unanswerable questions (e.g., q033 asking for revenue from the *largest single customer*). Because the retrieval found the correct company's annual report, it assumed the answer was present. The `_answerable` LLM check (V4) successfully diagnosed that the specific figures were missing from the context, triggering the correct `NOT_FOUND` response.
 
+
+### Task 6: Reflection
+
+Ten years from now, AI agents will handle most routine creation, coding, research and analytical work. In that world, I want to be a thoughtful, grounded human guide rather than merely a producer of task‑oriented outputs.
+
+My core ambition — to build safe, practical AI systems that serve real human needs — will still matter. AI can generate polished solutions at great speed, yet it is fundamentally built on chains of logical reasoning. It struggles to comprehend events that happen without clear, traceable causes. A sudden, unprovoked outbreak of war is one such example: there may be no neat sequence of reasons for it to parse. Not everything in human history and human life can be fully explained through deduction and inference. That inherent boundary will always limit what artificial intelligence can truly understand about our world. Even so, AI cannot independently judge what is responsible, fair, and aligned with people’s long‑term well‑being.
+
+Beyond productivity and career success, I hope to be known for careful empathy and good judgment. I want to be someone who listens deeply, understands subtle human priorities, and makes space for vulnerable, nuanced voices that automated systems often overlook.
+
+I am willing to struggle for genuine human connection and ethical accountability, even when AI can shortcut the hard work. AI can finish tasks instantly, but trust, shared understanding, and moral responsibility are built through slow, difficult conversations and painful trade‑offs.
+
+The qualities that keep me valuable will be moral reasoning, contextual empathy, the ability to hold conflicting values, and lived human experience. AI can synthesize massive volumes of information, but it cannot truly feel, care, or take long‑term responsibility for the harm its decisions may bring.
+
+If human value is no longer measured mainly by what I can produce or accomplish, I would turn to my Christian faith. Instead of defining my worth by worldly metrics or technical achievements, I would place my identity under God’s judgement, striving to live as a son of God. My value would not come from my own capabilities, but from who I am in His sight. My identity comes from my commitments: to protect marginalized people, to pursue fairness, and to use technology as a gentle tool instead of a blind optimization machine, while seeking to live out my faith in daily choices.
+
+Starting tomorrow, I will shift my focus away from only chasing technical outputs. I will spend more time studying human values, talking to people affected by AI systems, practising slow critical reflection before rushing to build or automate things, and also making more space for my spiritual life and faith practice.
