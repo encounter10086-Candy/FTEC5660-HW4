@@ -221,7 +221,6 @@ import functools
 from collections import defaultdict
 from rank_bm25 import BM25Okapi
 
-# ---------- helpers ----------
 _LEGAL_RE = re.compile(r"(?:[,\s]+(?:inc|corp|corporation|ltd|limited|llc|plc|co|ag|nv|sa))+\.?\s*$", re.I)
 
 def _norm_company(name: str) -> str:
@@ -231,7 +230,6 @@ def _norm_company(name: str) -> str:
 _STOP = set("""what which who whom whose how much many were was did does do is are the a an of in at on for to
 and or by its their usd millions million percent report year fiscal""".split())
 
-# 通用金融词汇的同义扩展（不含任何具体公司或答案）
 _SYN = {
     "employees": ["employed", "headcount", "people"], "employee": ["employed", "headcount", "people"],
     "headquartered": ["headquarters"], "cfo": ["chief", "financial", "officer"],
@@ -244,7 +242,7 @@ _SYN = {
 def _tokenize(text: str) -> list[str]:
     toks = []
     for w in re.findall(r"[a-z]+|\d[\d,]*(?:\.\d+)?", text.lower()):
-        toks.append(w[:6] if w.isalpha() and len(w) > 6 else w)   # 前缀词干
+        toks.append(w[:6] if w.isalpha() and len(w) > 6 else w)
     return toks
 
 def _query_tokens(question: str, companies: list[str]) -> list[str]:
@@ -256,20 +254,24 @@ def _query_tokens(question: str, companies: list[str]) -> list[str]:
     return [t for w in words for t in _tokenize(w)]
 
 
-# ---------- index ----------
 def build_index(chunks: list[Document]) -> Any:
-    bm25 = BM25Okapi([_tokenize(d.page_content) for d in chunks], k1=1.2, b=0.75)  # 全语料 IDF，只建一次
+    """Task 2: index the chunks of the whole corpus (the output of chunk_document), once per run.
+
+    Return anything retrieve() needs: a BM25 or TF-IDF index, the chunks grouped by metadata, ...
+    """
+    ### YOUR CODE HERE
+    
+    bm25 = BM25Okapi([_tokenize(d.page_content) for d in chunks], k1=1.2, b=0.75)  
     ann_years = {d.metadata["fiscal_year"] for d in chunks if d.metadata["doc_type"] == "annual_report"}
     return {
         "bm25": bm25,
         "all_chunks": chunks,
         "norm_names": {_norm_company(d.metadata["company"]) for d in chunks},
-        "covered_years": ann_years | {y - 1 for y in ann_years},        # 年报覆盖当年和上一年
+        "covered_years": ann_years | {y - 1 for y in ann_years},       
         "all_years": {d.metadata["fiscal_year"] for d in chunks},
     }
 
 
-# ---------- abstention: content check ----------
 def _answerable(question: str, chunks: list[Document]) -> bool:
     try:
         prompt = f"""Context passages:
@@ -283,37 +285,39 @@ for the right company and period? Do not guess or infer, and do not accept a dif
 values must be present. Reply with exactly YES or NO."""
         return not make_llm().invoke(prompt).content.strip().upper().startswith("NO")
     except Exception:
-        return True      # 出错时不误拒
+        return True
 
 
-# ---------- retrieve ----------
 def retrieve(index: Any, question: str) -> list[Document]:
+    """Tasks 2 and 3: at most MAX_RETRIEVED of the chunks given to build_index, best first.
+
+    Return [] when the corpus cannot answer the question: the generator then answers NOT_FOUND.
+    """
+    ### YOUR CODE HERE
+    
     parsed = parse_query(question)
     year = parsed.get("fiscal_year")
     dtype = parsed.get("doc_type") or "annual_report"
     chunks = index["all_chunks"]
     corpus_names = index["norm_names"]
-
-    # 1) 公司：parse 的结果 ∪ 在问题文本里直接匹配到的语料公司名（实体解析兜底）
+    
     parsed_norm = [_norm_company(c) for c in (parsed.get("companies") or [])]
     q_low = question.lower()
     found = [n for n in corpus_names if n in q_low]
     targets = list(dict.fromkeys(parsed_norm + found))
 
-    # 拒答 A：问题里有任何一家公司不在语料里（精确匹配，不用子串）
     if any(n not in corpus_names for n in parsed_norm):
         return []
 
-    # 拒答 B：年份不在语料可覆盖范围（由语料推出，不写死）
+    
     if year:
         cov, allf = index["covered_years"], index["all_years"]
         if dtype == "annual_report":
             if year not in cov:
                 return []
-        elif year < min(cov | allf) or year > max(allf) + 2:   # 允许 FY2026 指引/预测
+        elif year < min(cov | allf) or year > max(allf) + 2:
             return []
 
-    # 2) 全语料 BM25 打分，再用 metadata 做掩码（公司 + 文档类型 + 年份）
     scores = index["bm25"].get_scores(_query_tokens(question, [c for c in (parsed.get("companies") or [])] + targets))
 
     def pick(name, strict_year):
@@ -328,7 +332,7 @@ def retrieve(index: Any, question: str) -> list[Document]:
                 continue
             s = scores[i]
             if year and dtype == "annual_report" and m["fiscal_year"] == year:
-                s *= 1.2                    # 报告期等于所问年份的年报略优先（避免新旧 CFO/审计师混淆）
+                s *= 1.2
             out.append((s, i))
         out.sort(reverse=True)
         return [i for _, i in out]
@@ -340,7 +344,6 @@ def retrieve(index: Any, question: str) -> list[Document]:
     if not any(ranked):
         return []
 
-    # 3) 轮流从每家公司取：对比题两家都有 chunk；单公司就是 top-5
     result, seen, rnd = [], set(), 0
     while len(result) < MAX_RETRIEVED and any(rnd < len(r) for r in ranked):
         for r in ranked:
@@ -351,7 +354,6 @@ def retrieve(index: Any, question: str) -> list[Document]:
                     result.append(d)
         rnd += 1
 
-    # 拒答 C：检索内容里是否真的有所问内容（拦截「未披露」类）
     if not _answerable(question, result):
         return []
     return result
