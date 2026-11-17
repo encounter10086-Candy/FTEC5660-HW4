@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import argparse
@@ -273,7 +272,7 @@ values must be present. Reply with exactly YES or NO."""
 
 def retrieve(index: Any, question: str) -> list[Document]:
   
-    if ABLATION_MODE in ("B0", "V1"):
+    if ABLATION_MODE == "B0":
         tokenize_fn = index["_b0_simple_tokenize"]
         query_tokens = tokenize_fn(question)
         scores = index["bm25"].get_scores(query_tokens)
@@ -281,8 +280,14 @@ def retrieve(index: Any, question: str) -> list[Document]:
         scored.sort(reverse=True)
         top_idx = [i for _, i in scored[:MAX_RETRIEVED]]
         return [index["all_chunks"][i] for i in top_idx]
+    if ABLATION_MODE == "V1":
+        query_tokens = _tokenize(question)
+        scores = index["bm25"].get_scores(query_tokens)
+        scored = [(scores[i], i) for i in range(len(index["all_chunks"]))]
+        scored.sort(reverse=True)
+        top_idx = [i for _, i in scored[:MAX_RETRIEVED]]
+        return [index["all_chunks"][i] for i in top_idx]
 
-  
     parsed = parse_query(question)
     year = parsed.get("fiscal_year")
     dtype = parsed.get("doc_type") or "annual_report"
