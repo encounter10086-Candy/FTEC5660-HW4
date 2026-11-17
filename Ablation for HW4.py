@@ -27,7 +27,7 @@ from langchain_deepseek import ChatDeepSeek
 
 load_dotenv()
 
-ABLATION_MODE = ""   # B0 / V1 / V2 / V3 / V4
+ABLATION_MODE: str   # B0 / V1 / V2 / V3 / V4
 MAX_RETRIEVED = 5
 
 
